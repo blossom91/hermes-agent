@@ -320,6 +320,7 @@ class FeishuAdapterSettings:
     default_group_policy: str = ""
     group_rules: dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
+    ignore_at_all: bool = False  # True = @everyone does NOT count as a self-mention
     require_mention: bool = True
     allow_all_dm: bool = False  # resolved per-profile so multiplexed adapters honor their own .env
 
@@ -1292,6 +1293,7 @@ class FeishuAdapter(BasePlatformAdapter):
     supports_code_blocks = True  # Feishu renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     serial_receive_loop = True  # a chat's next message waits on its lock (_handle_message_with_guards)
+    _ignore_at_all: bool = False  # mirrored from settings by _apply_settings (default for the class)
     MAX_MESSAGE_LENGTH = 8000
     CHAT_LOCK_MAX_SIZE: int = 1000  # distinct chat IDs kept in _chat_locks before LRU eviction
     _SPLIT_THRESHOLD = 4000  # chunk near Feishu's ~4096-char client split → continuation almost certain
@@ -1389,6 +1391,10 @@ class FeishuAdapter(BasePlatformAdapter):
         allow_all_dm = any(
             _secret(var).lower() in {"true", "1", "yes"} for var in ("FEISHU_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS")
         )
+        # @everyone is a broadcast, not a mention of this bot: with ignore_at_all on, an @all-only
+        # message never satisfies require_mention (and never wakes a bot-to-bot reply).
+        ignore_at_all_raw = _shared_extra_or_secret(extra, "ignore_at_all", "FEISHU_IGNORE_AT_ALL", "false")
+        ignore_at_all = _to_boolean(ignore_at_all_raw) or str(ignore_at_all_raw).strip().lower() in {"1", "yes", "on"}
         return FeishuAdapterSettings(
             app_id=_extra_or_secret("app_id", "FEISHU_APP_ID"),
             app_secret=_extra_or_secret("app_secret", "FEISHU_APP_SECRET"),
@@ -1416,7 +1422,7 @@ class FeishuAdapter(BasePlatformAdapter):
             ws_ping_timeout=_coerce_int(extra.get("ws_ping_timeout"), default=None, min_value=1),
             admins=frozenset(_id_set(extra.get("admins", []))),
             default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
-            group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
+            group_rules=group_rules, allow_bots=allow_bots, ignore_at_all=ignore_at_all, allow_all_dm=allow_all_dm,
             require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),
         )
 
@@ -3495,15 +3501,18 @@ class FeishuAdapter(BasePlatformAdapter):
         return bool(sender_ids and (sender_ids & self._allowed_group_users))
 
     def _mentions_self(self, message: Any) -> bool:
-        # @_all is Feishu's @everyone placeholder.
+        # A real self-mention always counts; @_all (Feishu's @everyone placeholder) counts only
+        # when ignore_at_all is off — a broadcast is not an address to this bot.
         raw_content = getattr(message, "content", "") or ""
-        if "@_all" in raw_content:
-            return True
         mentions = getattr(message, "mentions", None) or []
         if mentions and self._message_mentions_bot(mentions):
             return True
         normalized = self._normalize(getattr(message, "message_type", "") or "", raw_content, getattr(message, "mentions", None))
-        return self._post_mentions_bot(normalized.mentions)
+        if self._post_mentions_bot(normalized.mentions):
+            return True
+        if "@_all" in raw_content or any(ref.is_all for ref in normalized.mentions):
+            return not self._ignore_at_all
+        return False
 
     def _message_mentions_bot(self, mentions: list[Any]) -> bool:
         # Same precedence as _FeishuBotIdentity.matches (open_id > user_id > name); a non-empty
@@ -4497,10 +4506,25 @@ def interactive_setup() -> None:
 
 
 def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
-    """``apply_yaml_config_fn`` (#24849): bridge config.yaml feishu.allow_bots to FEISHU_ALLOW_BOTS (env wins) and
-    seed ``extra.allow_bots`` so a multiplexed secondary profile's adapter reads its own value."""
-    seeded = _apply_yaml_bridge(feishu_cfg, (("allow_bots", "FEISHU_ALLOW_BOTS", "lower"),))
-    return {"allow_bots": str(seeded["allow_bots"]).lower()} if seeded else None
+    """``apply_yaml_config_fn`` (#24849): bridge config.yaml ``feishu.allow_bots`` /
+    ``feishu.ignore_at_all`` to their FEISHU_* env vars (env wins) and seed the matching
+    ``extra`` keys so a multiplexed secondary profile's adapter reads its own value."""
+    seeded = _apply_yaml_bridge(
+        feishu_cfg,
+        (
+            ("allow_bots", "FEISHU_ALLOW_BOTS", "lower"),
+            ("ignore_at_all", "FEISHU_IGNORE_AT_ALL", "lower"),
+        ),
+    )
+    if not seeded:
+        return None
+    extra: dict[str, Any] = {}
+    if "allow_bots" in seeded:
+        extra["allow_bots"] = str(seeded["allow_bots"]).lower()
+    if "ignore_at_all" in seeded:
+        # Raw YAML value (bool or string); _load_settings accepts true/1/yes/on, any casing.
+        extra["ignore_at_all"] = seeded["ignore_at_all"]
+    return extra
 
 
 def _is_connected(config) -> bool:

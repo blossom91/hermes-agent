@@ -242,6 +242,8 @@ FEISHU_GROUP_POLICY=allowlist   # default
 
 In all modes, the bot must be explicitly @mentioned (or @all) in the group before the message is processed. Direct messages always bypass this gate.
 
+By default an @all broadcast counts as a mention, so every @所有人 wakes the bot. Set `ignore_at_all: true` in `config.yaml` (or `FEISHU_IGNORE_AT_ALL=true`) to treat @all as a broadcast that is **not** addressed to the bot: @all-only group messages are then skipped, while an explicit @mention of the bot still works as before.
+
 With the default `allowlist` policy and an empty `FEISHU_ALLOWED_USERS`, every human group message is rejected while DMs keep working. The first such drop is logged once at `WARNING` with the keys to set; later drops are `DEBUG`. Under a [multiplexed gateway](../multi-profile-gateways.md), each profile reads only its **own** `.env` — a `FEISHU_GROUP_POLICY=open` in the default profile's `.env` does not apply to a secondary profile's bot. Put `FEISHU_GROUP_POLICY` / `FEISHU_ALLOWED_USERS` in `profiles/<name>/.env`, or use `group_rules` in that profile's `config.yaml`.
 
 Set `FEISHU_REQUIRE_MENTION=false` to let Hermes read all group traffic without requiring an @mention:
@@ -276,7 +278,7 @@ FEISHU_ALLOW_BOTS=mentions   # default: none
 | `mentions` | Accept only when the peer bot @mentions Hermes. |
 | `all` | Accept every peer bot message. |
 
-Also configurable as `feishu.allow_bots` in `config.yaml` (env wins when both are set).
+Also configurable as `feishu.allow_bots` in `config.yaml` (env wins when both are set). `feishu.ignore_at_all` works the same way for the @all switch described above.
 
 Peer bots do not need to be added to `FEISHU_ALLOWED_USERS` — that allowlist applies to human senders only.
 
@@ -559,6 +561,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_ALLOWED_USERS` | — | _(empty)_ | Comma-separated open_id list for user allowlist |
 | `FEISHU_ALLOW_BOTS` | — | `none` | Accept messages from other bots: `none`, `mentions`, or `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | Whether group messages must @mention the bot |
+| `FEISHU_IGNORE_AT_ALL` | — | `false` | `true` = @all/@所有人 broadcasts do not count as a mention (also `feishu.ignore_at_all` in `config.yaml`) |
 | `FEISHU_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `FEISHU_ENCRYPT_KEY` | — | _(empty)_ | Encrypt key for webhook signature verification |
 | `FEISHU_VERIFICATION_TOKEN` | — | _(empty)_ | Verification token for webhook payload auth |
